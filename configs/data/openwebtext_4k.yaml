@@ -1,0 +1,13 @@
+name: openwebtext_4k
+train_path: ${env:DATA_PATH}
+val_path: null
+text_column: text
+tokenizer_dir: Tokenizer/V1
+sequence_length: 4096
+batch_size: 2
+num_workers: 2
+pin_memory: true
+shuffle_shards: true
+seed: 1337
+max_train_sequences: null
+max_val_sequences: 128

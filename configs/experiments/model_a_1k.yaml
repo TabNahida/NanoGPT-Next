@@ -1,0 +1,7 @@
+name: model_a_1k
+defaults:
+  model: model/model_a_300m.yaml
+  data: data/openwebtext_1k.yaml
+  train: train/base.yaml
+output_root: runs
+notes: "300M baseline with 1K context"
