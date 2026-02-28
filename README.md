@@ -17,7 +17,7 @@ python -m pip install -e .[dev]
 
 2. Ensure `.env` contains `DATA_PATH`, e.g.:
 ```env
-DATA_PATH=D:\\Data\\AI\\LLM\\Text\\OpenWebText\\plain_text\\train-*-of-00080.parquet
+DATA_PATH=/Path/to/Data/File/train-*-of-00080.parquet
 ```
 
 3. Run a short smoke training:
