@@ -1,7 +1,0 @@
-name: model_b_4k
-defaults:
-  model: model/model_b_500m.yaml
-  data: data/openwebtext_4k.yaml
-  train: train/base.yaml
-output_root: runs
-notes: "500M baseline with 4K context"
