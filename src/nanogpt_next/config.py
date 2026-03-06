@@ -87,7 +87,7 @@ class TrainerConfig:
     eval_every: int = 0
     eval_batches: int = 0
     save_every: int = 1000
-    keep_last_n_checkpoints: int = 5
+    keep_last_n_checkpoints: int = 0
     resume_from: str = "auto"
     output_dir: str = "outputs"
     sample_every: int = 0

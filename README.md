@@ -82,6 +82,7 @@ Each run writes into `outputs/<run_name>/`:
 - `metrics.csv`
 - `metrics.jsonl`
 - `metrics.png`
+- `checkpoints/last.pt`
 - `checkpoints/latest.pt`
 - `checkpoints/step-XXXXXXXX.pt`
 - `samples/` when text sampling is enabled
