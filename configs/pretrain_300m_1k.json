@@ -23,7 +23,7 @@
     "train_glob": "",
     "val_glob": "",
     "tokenizer_backend": "auto",
-    "tokenizer_path": "Tokenizer/V1/tokenizer.json",
+    "tokenizer_path": "Tokenizer/V2/tokenizer.json",
     "text_column": "auto",
     "candidate_text_columns": ["text", "plain_text", "content", "document"],
     "add_bos": false,
