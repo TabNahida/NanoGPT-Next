@@ -5,3 +5,5 @@ __pycache__/
 pytest-cache-files-*/
 runs/
 *.ckpt
+outputs/
+tmp/
