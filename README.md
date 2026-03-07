@@ -64,6 +64,8 @@ DATA_PATH=/OpenWebText/plain_text/train-*-of-00080.parquet
 python -m nanogpt_next.train --config configs/pretrain_300m_1k.json
 ```
 
+To enable validation during training, `data.val_glob` must be set. `trainer.eval_every` alone is not enough.
+
 Common overrides:
 
 ```bash
@@ -91,4 +93,13 @@ Each run writes into `outputs/<run_name>/`:
 
 ```bash
 python scripts/plot_metrics.py outputs/pretrain-300m-1k/metrics.csv --output outputs/pretrain-300m-1k/metrics.png
+```
+
+## Sample From Checkpoint
+
+```bash
+python -m nanogpt_next.sample ^
+  --checkpoint outputs/pretrain-300m-1k/checkpoints/last.pt ^
+  --prompt "The future of open language models is" ^
+  --max-new-tokens 128
 ```

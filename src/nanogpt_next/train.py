@@ -196,6 +196,8 @@ def main() -> None:
         seed=config.seed,
         micro_batch_size=config.trainer.micro_batch_size,
     )
+    if config.trainer.eval_every > 0 and val_loader is None:
+        print("warning: eval_every > 0 but no validation dataset is configured; set data.val_glob or pass --val-glob.")
     if config.model.vocab_size != tokenizer.vocab_size:
         config.model.vocab_size = tokenizer.vocab_size
         save_config(config, run_dir / "config.resolved.json")

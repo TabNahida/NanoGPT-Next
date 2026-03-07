@@ -25,6 +25,7 @@ viz = ["tensorboard>=2.18"]
 [project.scripts]
 nanogpt-next-train = "nanogpt_next.train:main"
 nanogpt-next-plot = "nanogpt_next.plotting:main"
+nanogpt-next-sample = "nanogpt_next.sample:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }

@@ -35,7 +35,7 @@ class TokenizerAdapter:
 
     @property
     def eos_token_id(self) -> int | None:
-        return self._resolve_token_id(["</s>", "[EOS]", "<eos>"])
+        return self._resolve_token_id(["</s>", "[EOS]", "<eos>", "<|endoftext|>"])
 
     def encode(self, text: str) -> list[int]:
         if self.backend == "hf":
