@@ -42,6 +42,9 @@ class ModelConfig:
 class DataConfig:
     train_glob: str = ""
     val_glob: str = ""
+    auto_val_split: bool = False
+    auto_val_ratio: float = 0.01
+    auto_val_seed: int = 1337
     tokenizer_backend: str = "auto"
     tokenizer_path: str = "Tokenizer/V1/tokenizer.json"
     text_column: str = "auto"
@@ -116,6 +119,8 @@ class ExperimentConfig:
 
     def validate(self) -> None:
         self.model.validate()
+        if self.data.auto_val_split and not 0.0 < self.data.auto_val_ratio < 1.0:
+            raise ValueError("data.auto_val_ratio must be in (0, 1) when auto_val_split is enabled.")
         if self.trainer.precision not in {"fp32", "fp16", "bf16", "fp8"}:
             raise ValueError("precision must be one of fp32, fp16, bf16, fp8.")
         if self.trainer.micro_batch_size <= 0:

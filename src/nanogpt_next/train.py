@@ -196,6 +196,11 @@ def main() -> None:
         seed=config.seed,
         micro_batch_size=config.trainer.micro_batch_size,
     )
+    if config.data.auto_val_split and not config.data.val_glob:
+        print(
+            "info: validation data is auto-split from train_glob "
+            f"(ratio={config.data.auto_val_ratio:.4f}, seed={config.data.auto_val_seed})."
+        )
     if config.trainer.eval_every > 0 and val_loader is None:
         print("warning: eval_every > 0 but no validation dataset is configured; set data.val_glob or pass --val-glob.")
     if config.model.vocab_size != tokenizer.vocab_size:

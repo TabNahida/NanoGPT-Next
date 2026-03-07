@@ -52,6 +52,28 @@ You can point training data to either:
 - `data.train_glob` inside the JSON config
 - `DATA_PATH` in `.env`
 
+Validation can be configured in two ways:
+
+- explicit validation set through `data.val_glob`
+- automatic validation split from `data.train_glob` with:
+  - `data.auto_val_split`
+  - `data.auto_val_ratio`
+  - `data.auto_val_seed`
+
+Example:
+
+```json
+{
+  "data": {
+    "train_glob": "D:/data/train-*.parquet",
+    "val_glob": "",
+    "auto_val_split": true,
+    "auto_val_ratio": 0.01,
+    "auto_val_seed": 1337
+  }
+}
+```
+
 Example `.env`:
 
 ```env
