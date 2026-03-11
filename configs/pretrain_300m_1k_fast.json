@@ -52,7 +52,7 @@
     "device": "auto",
     "precision": "bf16",
     "matmul_precision": "high",
-    "compile_model": false,
+    "compile_model": true,
     "micro_batch_size": 4,
     "gradient_accumulation_steps": 32,
     "max_steps": 100000,
