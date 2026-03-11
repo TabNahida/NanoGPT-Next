@@ -10,7 +10,14 @@ import torch
 from torch.nn.utils import clip_grad_norm_
 from tqdm import tqdm
 
-from .checkpoint import find_latest_checkpoint, load_checkpoint, save_checkpoint, save_last_checkpoint
+from .checkpoint import (
+    AsyncLastCheckpointSaver,
+    clone_to_cpu,
+    find_latest_checkpoint,
+    load_checkpoint,
+    promote_checkpoint_to_last,
+    save_checkpoint,
+)
 from .config import ExperimentConfig, load_config, save_config
 from .data import build_tokenizer_and_dataloaders
 from .model import GPTModel
@@ -237,6 +244,7 @@ def main() -> None:
         return nullcontext()
 
     logger = MetricsLogger(run_dir, config.logging)
+    last_checkpoint_saver = AsyncLastCheckpointSaver(run_dir)
 
     total_params = model.num_parameters() if hasattr(model, "num_parameters") else sum(
         parameter.numel() for parameter in model.parameters()
@@ -267,166 +275,169 @@ def main() -> None:
     last_log_time = time.perf_counter()
     last_saved_step = start_step
 
-    for step in progress:
-        lr_mult = cosine_lr_multiplier(
-            step=step,
-            warmup_steps=config.trainer.warmup_steps,
-            decay_steps=config.trainer.lr_decay_steps,
-            min_lr_ratio=config.trainer.min_lr_ratio,
-        )
-        optimizer_bundle.set_lrs(
-            adamw_lr=config.optimizer.adamw_lr * lr_mult,
-            muon_lr=config.optimizer.muon_lr * lr_mult,
-        )
+    try:
+        for step in progress:
+            lr_mult = cosine_lr_multiplier(
+                step=step,
+                warmup_steps=config.trainer.warmup_steps,
+                decay_steps=config.trainer.lr_decay_steps,
+                min_lr_ratio=config.trainer.min_lr_ratio,
+            )
+            optimizer_bundle.set_lrs(
+                adamw_lr=config.optimizer.adamw_lr * lr_mult,
+                muon_lr=config.optimizer.muon_lr * lr_mult,
+            )
 
-        step_loss_total = 0.0
-        step_main_loss_total = 0.0
-        step_mtp_loss_total = 0.0
+            step_loss_total = 0.0
+            step_main_loss_total = 0.0
+            step_mtp_loss_total = 0.0
 
-        for micro_step in range(config.trainer.gradient_accumulation_steps):
-            input_ids, targets = next(train_iter)
-            input_ids = input_ids.to(device, non_blocking=True)
-            targets = targets.to(device, non_blocking=True)
-            with autocast_context():
-                output = model(input_ids, targets)
-                loss = output.loss
-                if loss is None or output.main_loss is None:
-                    raise RuntimeError("Model did not produce training loss.")
-                scaled_loss = loss / config.trainer.gradient_accumulation_steps
+            for micro_step in range(config.trainer.gradient_accumulation_steps):
+                input_ids, targets = next(train_iter)
+                input_ids = input_ids.to(device, non_blocking=True)
+                targets = targets.to(device, non_blocking=True)
+                with autocast_context():
+                    output = model(input_ids, targets)
+                    loss = output.loss
+                    if loss is None or output.main_loss is None:
+                        raise RuntimeError("Model did not produce training loss.")
+                    scaled_loss = loss / config.trainer.gradient_accumulation_steps
+                if scaler is not None and scaler.is_enabled():
+                    scaler.scale(scaled_loss).backward()
+                else:
+                    scaled_loss.backward()
+
+                step_loss_total += float(loss.detach().cpu())
+                step_main_loss_total += float(output.main_loss.detach().cpu())
+                if output.mtp_losses:
+                    step_mtp_loss_total += float(torch.stack(output.mtp_losses).mean().detach().cpu())
+                if micro_step + 1 == config.trainer.gradient_accumulation_steps:
+                    break
+
             if scaler is not None and scaler.is_enabled():
-                scaler.scale(scaled_loss).backward()
-            else:
-                scaled_loss.backward()
+                scaler.unscale_(optimizer_bundle.adamw)
+                if optimizer_bundle.muon is not None:
+                    scaler.unscale_(optimizer_bundle.muon)
 
-            step_loss_total += float(loss.detach().cpu())
-            step_main_loss_total += float(output.main_loss.detach().cpu())
-            if output.mtp_losses:
-                step_mtp_loss_total += float(torch.stack(output.mtp_losses).mean().detach().cpu())
-            if micro_step + 1 == config.trainer.gradient_accumulation_steps:
-                break
+            grad_norm = float(clip_grad_norm_(model.parameters(), config.trainer.clip_grad_norm))
+            optimizer_bundle.step(scaler)
+            optimizer_bundle.zero_grad(set_to_none=True)
 
-        if scaler is not None and scaler.is_enabled():
-            scaler.unscale_(optimizer_bundle.adamw)
-            if optimizer_bundle.muon is not None:
-                scaler.unscale_(optimizer_bundle.muon)
+            tokens_seen += tokens_per_step
+            current_step = step + 1
+            step_loss = step_loss_total / config.trainer.gradient_accumulation_steps
+            step_main_loss = step_main_loss_total / config.trainer.gradient_accumulation_steps
+            step_mtp_loss = step_mtp_loss_total / config.trainer.gradient_accumulation_steps
+            should_save_step = config.trainer.save_every > 0 and current_step % config.trainer.save_every == 0
 
-        grad_norm = float(clip_grad_norm_(model.parameters(), config.trainer.clip_grad_norm))
-        optimizer_bundle.step(scaler)
-        optimizer_bundle.zero_grad(set_to_none=True)
+            window_loss += step_loss
+            window_main_loss += step_main_loss
+            window_mtp_loss += step_mtp_loss
+            window_steps += 1
 
-        tokens_seen += tokens_per_step
-        current_step = step + 1
-        step_loss = step_loss_total / config.trainer.gradient_accumulation_steps
-        step_main_loss = step_main_loss_total / config.trainer.gradient_accumulation_steps
-        step_mtp_loss = step_mtp_loss_total / config.trainer.gradient_accumulation_steps
-
-        window_loss += step_loss
-        window_main_loss += step_main_loss
-        window_mtp_loss += step_mtp_loss
-        window_steps += 1
-
-        progress.set_postfix(
-            loss=f"{step_loss:.4f}",
-            avg=f"{window_loss / max(window_steps, 1):.4f}",
-            lr=f"{config.optimizer.adamw_lr * lr_mult:.2e}",
-            grad=f"{grad_norm:.2f}",
-        )
-
-        logged_this_step = False
-        if current_step % config.trainer.log_every == 0 or current_step == 1:
-            now = time.perf_counter()
-            elapsed = max(now - last_log_time, 1e-6)
-            tokens_per_sec = (tokens_per_step * window_steps) / elapsed
-            avg_loss = window_loss / max(window_steps, 1)
-            avg_main_loss = window_main_loss / max(window_steps, 1)
-            avg_mtp_loss = window_mtp_loss / max(window_steps, 1)
-            metrics = {
-                "loss": avg_loss,
-                "main_loss": avg_main_loss,
-                "mtp_loss": avg_mtp_loss,
-                "lr": config.optimizer.adamw_lr * lr_mult,
-                "grad_norm": grad_norm,
-                "tokens_seen": tokens_seen,
-                "tokens_per_sec": tokens_per_sec,
-                "ppl": math.exp(min(avg_main_loss, 20.0)),
-            }
-            logger.log(current_step, "train", metrics)
-            payload = build_checkpoint_payload(
-                config=config,
-                model=model,
-                optimizer_bundle=optimizer_bundle,
-                scaler=scaler,
-                step=current_step,
-                tokens_seen=tokens_seen,
+            progress.set_postfix(
+                loss=f"{step_loss:.4f}",
+                avg=f"{window_loss / max(window_steps, 1):.4f}",
+                lr=f"{config.optimizer.adamw_lr * lr_mult:.2e}",
+                grad=f"{grad_norm:.2f}",
             )
-            save_last_checkpoint(run_dir=run_dir, payload=payload)
-            window_loss = 0.0
-            window_main_loss = 0.0
-            window_mtp_loss = 0.0
-            window_steps = 0
-            last_log_time = now
-            logged_this_step = True
 
-        if val_loader is not None and config.trainer.eval_every > 0 and current_step % config.trainer.eval_every == 0:
-            val_metrics = evaluate(
-                model=model,
-                data_iter=val_loader,
-                steps=config.trainer.eval_batches,
-                device=device,
-                autocast_context=autocast_context,
-            )
-            if val_metrics:
-                val_metrics["ppl"] = math.exp(min(val_metrics["main_loss"], 20.0))
-                logger.log(current_step, "val", val_metrics)
+            if current_step % config.trainer.log_every == 0 or current_step == 1:
+                now = time.perf_counter()
+                elapsed = max(now - last_log_time, 1e-6)
+                tokens_per_sec = (tokens_per_step * window_steps) / elapsed
+                avg_loss = window_loss / max(window_steps, 1)
+                avg_main_loss = window_main_loss / max(window_steps, 1)
+                avg_mtp_loss = window_mtp_loss / max(window_steps, 1)
+                metrics = {
+                    "loss": avg_loss,
+                    "main_loss": avg_main_loss,
+                    "mtp_loss": avg_mtp_loss,
+                    "lr": config.optimizer.adamw_lr * lr_mult,
+                    "grad_norm": grad_norm,
+                    "tokens_seen": tokens_seen,
+                    "tokens_per_sec": tokens_per_sec,
+                    "ppl": math.exp(min(avg_main_loss, 20.0)),
+                }
+                logger.log(current_step, "train", metrics)
+                if not should_save_step and not last_checkpoint_saver.has_pending_work():
+                    payload = build_checkpoint_payload(
+                        config=config,
+                        model=model,
+                        optimizer_bundle=optimizer_bundle,
+                        scaler=scaler,
+                        step=current_step,
+                        tokens_seen=tokens_seen,
+                    )
+                    last_checkpoint_saver.submit(clone_to_cpu(payload))
+                window_loss = 0.0
+                window_main_loss = 0.0
+                window_mtp_loss = 0.0
+                window_steps = 0
+                last_log_time = now
 
-        if config.trainer.sample_every > 0 and current_step % config.trainer.sample_every == 0:
-            sample = sample_text(
-                model=model,
-                tokenizer=tokenizer,
-                prompt=config.trainer.sample_prompt,
-                max_new_tokens=config.trainer.sample_tokens,
-                device=device,
-            )
-            if sample:
-                logger.log_text("sample", sample, current_step)
+            if val_loader is not None and config.trainer.eval_every > 0 and current_step % config.trainer.eval_every == 0:
+                val_metrics = evaluate(
+                    model=model,
+                    data_iter=val_loader,
+                    steps=config.trainer.eval_batches,
+                    device=device,
+                    autocast_context=autocast_context,
+                )
+                if val_metrics:
+                    val_metrics["ppl"] = math.exp(min(val_metrics["main_loss"], 20.0))
+                    logger.log(current_step, "val", val_metrics)
 
-        if config.trainer.save_every > 0 and current_step % config.trainer.save_every == 0:
+            if config.trainer.sample_every > 0 and current_step % config.trainer.sample_every == 0:
+                sample = sample_text(
+                    model=model,
+                    tokenizer=tokenizer,
+                    prompt=config.trainer.sample_prompt,
+                    max_new_tokens=config.trainer.sample_tokens,
+                    device=device,
+                )
+                if sample:
+                    logger.log_text("sample", sample, current_step)
+
+            if should_save_step:
+                last_checkpoint_saver.flush()
+                ckpt_payload = build_checkpoint_payload(
+                    config=config,
+                    model=model,
+                    optimizer_bundle=optimizer_bundle,
+                    scaler=scaler,
+                    step=current_step,
+                    tokens_seen=tokens_seen,
+                )
+                ckpt_path = save_checkpoint(
+                    run_dir=run_dir,
+                    step=current_step,
+                    payload=ckpt_payload,
+                    keep_last_n=config.trainer.keep_last_n_checkpoints,
+                )
+                promote_checkpoint_to_last(run_dir=run_dir, checkpoint_path=ckpt_path)
+                last_saved_step = current_step
+
+        if last_saved_step != config.trainer.max_steps:
+            last_checkpoint_saver.flush()
             ckpt_payload = build_checkpoint_payload(
                 config=config,
                 model=model,
                 optimizer_bundle=optimizer_bundle,
                 scaler=scaler,
-                step=current_step,
+                step=config.trainer.max_steps,
                 tokens_seen=tokens_seen,
             )
-            save_checkpoint(
+            ckpt_path = save_checkpoint(
                 run_dir=run_dir,
-                step=current_step,
+                step=config.trainer.max_steps,
                 payload=ckpt_payload,
                 keep_last_n=config.trainer.keep_last_n_checkpoints,
             )
-            if not logged_this_step:
-                save_last_checkpoint(run_dir=run_dir, payload=ckpt_payload)
-            last_saved_step = current_step
-
-    if last_saved_step != config.trainer.max_steps:
-        ckpt_payload = build_checkpoint_payload(
-            config=config,
-            model=model,
-            optimizer_bundle=optimizer_bundle,
-            scaler=scaler,
-            step=config.trainer.max_steps,
-            tokens_seen=tokens_seen,
-        )
-        save_checkpoint(
-            run_dir=run_dir,
-            step=config.trainer.max_steps,
-            payload=ckpt_payload,
-            keep_last_n=config.trainer.keep_last_n_checkpoints,
-        )
-        save_last_checkpoint(run_dir=run_dir, payload=ckpt_payload)
-
-    logger.close()
+            promote_checkpoint_to_last(run_dir=run_dir, checkpoint_path=ckpt_path)
+    finally:
+        last_checkpoint_saver.close()
+        logger.close()
 
 
 if __name__ == "__main__":
