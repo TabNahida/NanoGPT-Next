@@ -66,6 +66,33 @@ def clone_to_cpu(value: Any) -> Any:
     return value
 
 
+def unwrap_model(model: Any) -> Any:
+    return getattr(model, "_orig_mod", model)
+
+
+def export_model_state_dict(model: Any) -> OrderedDict[str, Any]:
+    return unwrap_model(model).state_dict()
+
+
+def load_model_state_dict(model: Any, state_dict: dict[str, Any]) -> None:
+    target_model = unwrap_model(model)
+    try:
+        target_model.load_state_dict(state_dict)
+        return
+    except RuntimeError as first_error:
+        normalized_state_dict = _strip_prefix_from_state_dict(state_dict, "_orig_mod.")
+        if normalized_state_dict is state_dict:
+            raise first_error
+        target_model.load_state_dict(normalized_state_dict)
+
+
+def _strip_prefix_from_state_dict(state_dict: dict[str, Any], prefix: str) -> dict[str, Any]:
+    keys = list(state_dict.keys())
+    if not keys or not all(isinstance(key, str) and key.startswith(prefix) for key in keys):
+        return state_dict
+    return OrderedDict((key[len(prefix) :], value) for key, value in state_dict.items())
+
+
 def save_checkpoint(run_dir: str | Path, step: int, payload: dict[str, Any], keep_last_n: int) -> Path:
     ckpt_dir = checkpoint_dir(run_dir)
     ckpt_path = ckpt_dir / f"step-{step:08d}.pt"

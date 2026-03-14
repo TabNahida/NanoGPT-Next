@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 
-from .checkpoint import load_checkpoint
+from .checkpoint import load_checkpoint, load_model_state_dict
 from .config import DataConfig, ModelConfig
 from .model import GPTModel
 from .tokenizer import TokenizerSpec, build_tokenizer
@@ -66,7 +66,7 @@ def main() -> None:
 
     model = GPTModel(model_config)
     maybe_enable_float8(model, precision, device)
-    model.load_state_dict(checkpoint["model"])
+    load_model_state_dict(model, checkpoint["model"])
     model = model.to(device)
     model.eval()
 
@@ -99,3 +99,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

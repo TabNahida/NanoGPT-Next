@@ -13,8 +13,10 @@ from tqdm import tqdm
 from .checkpoint import (
     AsyncLastCheckpointSaver,
     clone_to_cpu,
+    export_model_state_dict,
     find_latest_checkpoint,
     load_checkpoint,
+    load_model_state_dict,
     promote_checkpoint_to_last,
     save_checkpoint,
 )
@@ -102,7 +104,7 @@ def maybe_resume(
         return 0, 0
 
     checkpoint = load_checkpoint(ckpt_path)
-    model.load_state_dict(checkpoint["model"])
+    load_model_state_dict(model, checkpoint["model"])
     optimizer_bundle.load_state_dict(checkpoint["optimizers"])
     if scaler is not None and checkpoint.get("scaler") is not None:
         scaler.load_state_dict(checkpoint["scaler"])
@@ -121,7 +123,7 @@ def build_checkpoint_payload(
         "step": step,
         "tokens_seen": tokens_seen,
         "config": config.to_dict(),
-        "model": model.state_dict(),
+        "model": export_model_state_dict(model),
         "optimizers": optimizer_bundle.state_dict(),
         "scaler": None if scaler is None else scaler.state_dict(),
     }
@@ -442,3 +444,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
