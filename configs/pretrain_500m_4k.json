@@ -53,7 +53,7 @@
     "precision": "bf16",
     "matmul_precision": "high",
     "compile_model": true,
-    "micro_batch_size": 1,
+    "micro_batch_size": 4,
     "gradient_accumulation_steps": 128,
     "max_steps": 30000,
     "warmup_steps": 3000,
