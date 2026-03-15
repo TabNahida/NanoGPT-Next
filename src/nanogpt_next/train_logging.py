@@ -29,6 +29,9 @@ class MetricsLogger:
             "tokens_seen",
             "tokens_per_sec",
             "ppl",
+            "temperature_celsius",
+            "thermal_pause_seconds",
+            "total_thermal_pause_seconds",
         ]
         self._tb = None
         self._last_plot_step = -1

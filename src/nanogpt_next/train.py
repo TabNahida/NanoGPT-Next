@@ -23,6 +23,7 @@ from .checkpoint import (
 from .config import ExperimentConfig, load_config, save_config
 from .data import build_tokenizer_and_dataloaders
 from .model import GPTModel
+from .monitoring import DeviceTemperatureMonitor, TrainingStatusServer, TrainingStatusStore
 from .optim import OptimizerBundle, build_optimizers
 from .tokenizer import TokenizerAdapter
 from .train_logging import MetricsLogger
@@ -247,6 +248,16 @@ def main() -> None:
 
     logger = MetricsLogger(run_dir, config.logging)
     last_checkpoint_saver = AsyncLastCheckpointSaver(run_dir)
+    status_store = TrainingStatusStore()
+    status_server: TrainingStatusServer | None = None
+    thermal_monitor = DeviceTemperatureMonitor(
+        device=device,
+        enabled=config.monitoring.thermal_pause_enabled,
+        max_celsius=config.monitoring.thermal_max_celsius,
+        resume_celsius=config.monitoring.thermal_resume_celsius,
+        poll_interval=config.monitoring.thermal_poll_interval,
+        query_command=config.monitoring.thermal_query_command,
+    )
 
     total_params = model.num_parameters() if hasattr(model, "num_parameters") else sum(
         parameter.numel() for parameter in model.parameters()
@@ -256,6 +267,54 @@ def main() -> None:
         * config.trainer.gradient_accumulation_steps
         * config.model.max_seq_len
     )
+    status_store.update(
+        status="starting",
+        run_name=config.run_name,
+        run_dir=str(run_dir),
+        device=str(device),
+        precision=config.trainer.precision,
+        compile_model=config.trainer.compile_model,
+        max_steps=config.trainer.max_steps,
+        step=start_step,
+        progress=start_step / max(config.trainer.max_steps, 1),
+        tokens_seen=tokens_seen,
+        tokens_per_step=tokens_per_step,
+        params=total_params,
+        thermal_paused=False,
+        thermal_pause_seconds=0.0,
+        total_thermal_pause_seconds=0.0,
+        temperature_celsius=None,
+        temperature_monitoring_enabled=config.monitoring.thermal_pause_enabled,
+        temperature_monitoring_backend=thermal_monitor.backend_name,
+        temperature_monitoring_available=thermal_monitor.is_available(),
+        temperature_monitoring_reason=thermal_monitor.unavailable_reason,
+    )
+
+    if config.monitoring.status_api_enabled:
+        status_server = TrainingStatusServer(
+            store=status_store,
+            host=config.monitoring.status_api_host,
+            port=config.monitoring.status_api_port,
+        )
+        if status_server.start():
+            status_url = (
+                f"http://{config.monitoring.status_api_host}:{config.monitoring.status_api_port}/status"
+            )
+            print(f"info: status api listening on {status_url}")
+            status_store.update(status_api_url=status_url)
+        else:
+            print(
+                "warning: failed to start status api on "
+                f"{config.monitoring.status_api_host}:{config.monitoring.status_api_port}: {status_server.error}"
+            )
+            status_store.update(status_api_error=status_server.error)
+
+    if config.monitoring.thermal_pause_enabled and not thermal_monitor.is_available():
+        print(
+            "warning: thermal pause is enabled but temperature monitoring is unavailable: "
+            f"{thermal_monitor.unavailable_reason}"
+        )
+
     print(
         f"run_dir={run_dir} device={device} precision={config.trainer.precision} "
         f"params={format_num(total_params)} tokens_per_step={format_num(tokens_per_step)}"
@@ -276,6 +335,7 @@ def main() -> None:
     window_steps = 0
     last_log_time = time.perf_counter()
     last_saved_step = start_step
+    total_thermal_pause_seconds = 0.0
 
     try:
         for step in progress:
@@ -285,8 +345,9 @@ def main() -> None:
                 decay_steps=config.trainer.lr_decay_steps,
                 min_lr_ratio=config.trainer.min_lr_ratio,
             )
+            current_lr = config.optimizer.adamw_lr * lr_mult
             optimizer_bundle.set_lrs(
-                adamw_lr=config.optimizer.adamw_lr * lr_mult,
+                adamw_lr=current_lr,
                 muon_lr=config.optimizer.muon_lr * lr_mult,
             )
 
@@ -337,10 +398,21 @@ def main() -> None:
             window_mtp_loss += step_mtp_loss
             window_steps += 1
 
+            status_store.update(
+                status="running",
+                phase="train",
+                step=current_step,
+                progress=current_step / max(config.trainer.max_steps, 1),
+                tokens_seen=tokens_seen,
+                lr=current_lr,
+                temperature_monitoring_available=thermal_monitor.is_available(),
+                temperature_monitoring_reason=thermal_monitor.unavailable_reason,
+            )
+
             progress.set_postfix(
                 loss=f"{step_loss:.4f}",
                 avg=f"{window_loss / max(window_steps, 1):.4f}",
-                lr=f"{config.optimizer.adamw_lr * lr_mult:.2e}",
+                lr=f"{current_lr:.2e}",
                 grad=f"{grad_norm:.2f}",
             )
 
@@ -355,12 +427,44 @@ def main() -> None:
                     "loss": avg_loss,
                     "main_loss": avg_main_loss,
                     "mtp_loss": avg_mtp_loss,
-                    "lr": config.optimizer.adamw_lr * lr_mult,
+                    "lr": current_lr,
                     "grad_norm": grad_norm,
                     "tokens_seen": tokens_seen,
                     "tokens_per_sec": tokens_per_sec,
                     "ppl": math.exp(min(avg_main_loss, 20.0)),
                 }
+                current_temperature = thermal_monitor.read_temperature()
+                status_store.update(
+                    phase="train",
+                    loss=avg_loss,
+                    main_loss=avg_main_loss,
+                    mtp_loss=avg_mtp_loss,
+                    grad_norm=grad_norm,
+                    tokens_per_sec=tokens_per_sec,
+                    ppl=metrics["ppl"],
+                    temperature_celsius=current_temperature,
+                    thermal_paused=False,
+                    total_thermal_pause_seconds=total_thermal_pause_seconds,
+                    last_log_step=current_step,
+                )
+                if thermal_monitor.should_pause(current_temperature):
+                    current_temperature, pause_seconds, _ = thermal_monitor.throttle_if_needed(
+                        current_temperature=current_temperature,
+                        status_store=status_store,
+                        current_step=current_step,
+                        progress=progress,
+                    )
+                    total_thermal_pause_seconds += pause_seconds
+                    metrics["thermal_pause_seconds"] = pause_seconds
+                    metrics["total_thermal_pause_seconds"] = total_thermal_pause_seconds
+                    status_store.update(
+                        temperature_celsius=current_temperature,
+                        thermal_paused=False,
+                        thermal_pause_seconds=pause_seconds,
+                        total_thermal_pause_seconds=total_thermal_pause_seconds,
+                    )
+                if current_temperature is not None:
+                    metrics["temperature_celsius"] = current_temperature
                 logger.log(current_step, "train", metrics)
                 if not should_save_step and not last_checkpoint_saver.has_pending_work():
                     payload = build_checkpoint_payload(
@@ -389,6 +493,13 @@ def main() -> None:
                 if val_metrics:
                     val_metrics["ppl"] = math.exp(min(val_metrics["main_loss"], 20.0))
                     logger.log(current_step, "val", val_metrics)
+                    status_store.update(
+                        val_step=current_step,
+                        val_loss=val_metrics["loss"],
+                        val_main_loss=val_metrics["main_loss"],
+                        val_mtp_loss=val_metrics["mtp_loss"],
+                        val_ppl=val_metrics["ppl"],
+                    )
 
             if config.trainer.sample_every > 0 and current_step % config.trainer.sample_every == 0:
                 sample = sample_text(
@@ -400,6 +511,7 @@ def main() -> None:
                 )
                 if sample:
                     logger.log_text("sample", sample, current_step)
+                    status_store.update(last_sample_step=current_step, last_sample=sample)
 
             if should_save_step:
                 last_checkpoint_saver.flush()
@@ -419,6 +531,7 @@ def main() -> None:
                 )
                 promote_checkpoint_to_last(run_dir=run_dir, checkpoint_path=ckpt_path)
                 last_saved_step = current_step
+                status_store.update(last_checkpoint_step=current_step, last_checkpoint_path=str(ckpt_path))
 
         if last_saved_step != config.trainer.max_steps:
             last_checkpoint_saver.flush()
@@ -437,11 +550,27 @@ def main() -> None:
                 keep_last_n=config.trainer.keep_last_n_checkpoints,
             )
             promote_checkpoint_to_last(run_dir=run_dir, checkpoint_path=ckpt_path)
+            status_store.update(
+                last_checkpoint_step=config.trainer.max_steps,
+                last_checkpoint_path=str(ckpt_path),
+            )
+        status_store.update(
+            status="completed",
+            phase="idle",
+            step=config.trainer.max_steps,
+            progress=1.0,
+            tokens_seen=tokens_seen,
+            total_thermal_pause_seconds=total_thermal_pause_seconds,
+        )
+    except BaseException as exc:
+        status_store.update(status="failed", error=str(exc))
+        raise
     finally:
         last_checkpoint_saver.close()
         logger.close()
+        if status_server is not None:
+            status_server.close()
 
 
 if __name__ == "__main__":
     main()
-

@@ -108,6 +108,18 @@ class LoggingConfig:
 
 
 @dataclass(slots=True)
+class MonitoringConfig:
+    thermal_pause_enabled: bool = False
+    thermal_max_celsius: float = 83.0
+    thermal_resume_celsius: float = 75.0
+    thermal_poll_interval: float = 15.0
+    thermal_query_command: str = ""
+    status_api_enabled: bool = False
+    status_api_host: str = "127.0.0.1"
+    status_api_port: int = 8008
+
+
+@dataclass(slots=True)
 class ExperimentConfig:
     run_name: str
     seed: int
@@ -116,6 +128,7 @@ class ExperimentConfig:
     optimizer: OptimizerConfig
     trainer: TrainerConfig
     logging: LoggingConfig
+    monitoring: MonitoringConfig
 
     def validate(self) -> None:
         self.model.validate()
@@ -129,6 +142,17 @@ class ExperimentConfig:
             raise ValueError("gradient_accumulation_steps must be positive.")
         if self.trainer.max_steps <= 0:
             raise ValueError("max_steps must be positive.")
+        if self.trainer.log_every <= 0:
+            raise ValueError("log_every must be positive.")
+        if self.monitoring.thermal_pause_enabled:
+            if self.monitoring.thermal_poll_interval <= 0:
+                raise ValueError("monitoring.thermal_poll_interval must be positive when thermal pause is enabled.")
+            if self.monitoring.thermal_resume_celsius > self.monitoring.thermal_max_celsius:
+                raise ValueError(
+                    "monitoring.thermal_resume_celsius must be less than or equal to monitoring.thermal_max_celsius."
+                )
+        if self.monitoring.status_api_enabled and self.monitoring.status_api_port <= 0:
+            raise ValueError("monitoring.status_api_port must be positive when the status API is enabled.")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -143,6 +167,7 @@ def _from_dict(config_dict: dict[str, Any]) -> ExperimentConfig:
         optimizer=OptimizerConfig(**config_dict.get("optimizer", {})),
         trainer=TrainerConfig(**config_dict.get("trainer", {})),
         logging=LoggingConfig(**config_dict.get("logging", {})),
+        monitoring=MonitoringConfig(**config_dict.get("monitoring", {})),
     )
     experiment.validate()
     return experiment
