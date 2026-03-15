@@ -77,5 +77,15 @@
     "enable_tensorboard": true,
     "enable_plot": true,
     "plot_every": 100
+  },
+  "monitoring": {
+    "thermal_pause_enabled": true,
+    "thermal_max_celsius": 83.0,
+    "thermal_resume_celsius": 63.0,
+    "thermal_poll_interval": 5.0,
+    "thermal_query_command": "",
+    "status_api_enabled": true,
+    "status_api_host": "127.0.0.1",
+    "status_api_port": 8008
   }
 }
